@@ -1,0 +1,590 @@
+-- ╔══════════════════════════════════════════╗
+-- ║   Auto Rejoin & Reconnect | Mobile UI   ║
+-- ║   Full standalone script — no libraries ║
+-- ╚══════════════════════════════════════════╝
+
+-- ── 1. Wait for everything to be ready ───────────────────────────────────────
+
+repeat task.wait(0.1) until game and game:IsLoaded()
+task.wait(1.5)
+
+-- ── 2. Services ───────────────────────────────────────────────────────────────
+
+local Players          = game:GetService("Players")
+local TeleportService  = game:GetService("TeleportService")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+-- ── 3. Local player safety ────────────────────────────────────────────────────
+
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then
+    LocalPlayer = Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+    LocalPlayer = Players.LocalPlayer
+end
+
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 15)
+if not PlayerGui then
+    warn("[AutoRejoin] PlayerGui not found — aborting")
+    return
+end
+
+-- ── 4. Game info ──────────────────────────────────────────────────────────────
+
+local placeId = tostring(game.PlaceId)
+local jobId   = tostring(game.JobId)
+
+-- ── 5. State ──────────────────────────────────────────────────────────────────
+
+local rejoinEnabled    = false
+local rejoinMode       = "Same"   -- "Same" | "New"
+local rejoinInterval   = 30
+local rejoinCountdown  = 30
+local rejoinConn       = nil
+
+local reconnectEnabled = false
+local reconnectMode    = "Same"
+local reconnectDelay   = 5
+local kickConn         = nil
+local teleFailConn     = nil
+
+local rjStatusLabel    = nil
+local rcStatusLabel    = nil
+
+-- ── 6. Teleport helper ────────────────────────────────────────────────────────
+
+local function doTeleport(mode)
+    local ok, err = pcall(function()
+        if mode == "Same" then
+            TeleportService:TeleportToPlaceInstance(placeId, jobId, LocalPlayer)
+        else
+            TeleportService:Teleport(placeId, LocalPlayer)
+        end
+    end)
+    if not ok then
+        warn("[AutoRejoin] Teleport failed:", err)
+    end
+end
+
+-- ── 7. Reconnect listeners ────────────────────────────────────────────────────
+
+-- BindToClose fires on disconnect / server shutdown
+-- Registered once at script load; gated by reconnectEnabled flag
+game:BindToClose(function()
+    if not reconnectEnabled then return end
+    pcall(function()
+        if rcStatusLabel then rcStatusLabel.Text = "Disconnected — reconnecting..." end
+    end)
+    doTeleport(reconnectMode)
+    task.wait(reconnectDelay + 3)
+end)
+
+local function startReconnectListeners()
+    -- Kicked event fires specifically when the server kicks YOU
+    if not kickConn then
+        kickConn = LocalPlayer.Kicked:Connect(function()
+            if not reconnectEnabled then return end
+            pcall(function()
+                if rcStatusLabel then
+                    rcStatusLabel.Text = "Kicked! Reconnecting in " .. reconnectDelay .. "s"
+                end
+            end)
+            task.wait(reconnectDelay)
+            if reconnectEnabled then
+                doTeleport(reconnectMode)
+            end
+        end)
+    end
+
+    -- Retry if the teleport itself errors
+    if not teleFailConn then
+        teleFailConn = TeleportService.TeleportInitFailed:Connect(function(player, result, msg)
+            if player ~= LocalPlayer or not reconnectEnabled then return end
+            warn("[AutoRejoin] TeleportInitFailed:", result, msg)
+            task.delay(reconnectDelay, function()
+                if reconnectEnabled then
+                    doTeleport(reconnectMode)
+                end
+            end)
+        end)
+    end
+end
+
+local function stopReconnectListeners()
+    if kickConn     then kickConn:Disconnect();     kickConn     = nil end
+    if teleFailConn then teleFailConn:Disconnect();  teleFailConn = nil end
+end
+
+-- ── 8. Remove old GUI if re-executing ────────────────────────────────────────
+
+local existing = PlayerGui:FindFirstChild("AutoRejoinMobileUI")
+if existing then existing:Destroy() end
+task.wait(0.05)
+
+-- ── 9. Build GUI ──────────────────────────────────────────────────────────────
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name             = "AutoRejoinMobileUI"
+ScreenGui.ResetOnSpawn     = false
+ScreenGui.ZIndexBehavior   = Enum.ZIndexBehavior.Sibling
+ScreenGui.DisplayOrder     = 999
+ScreenGui.IgnoreGuiInset   = true
+ScreenGui.Parent           = PlayerGui
+
+-- Colours
+local BG      = Color3.fromRGB(15,  15,  20)
+local PANEL   = Color3.fromRGB(24,  24,  34)
+local ACCENT  = Color3.fromRGB(99,  102, 241)
+local ACCENT2 = Color3.fromRGB(67,  70,  185)
+local GREEN   = Color3.fromRGB(34,  197, 94)
+local WHITE   = Color3.fromRGB(235, 235, 245)
+local MUTED   = Color3.fromRGB(130, 130, 155)
+local BORDER  = Color3.fromRGB(45,  45,  65)
+
+-- ── Utility: create instance ──────────────────────────────────────────────────
+
+local function New(class, props, parent)
+    local obj = Instance.new(class)
+    for k, v in pairs(props) do
+        obj[k] = v
+    end
+    if parent then obj.Parent = parent end
+    return obj
+end
+
+local function corner(r, parent)
+    return New("UICorner", {CornerRadius = UDim.new(0, r)}, parent)
+end
+
+local function stroke(color, thick, parent)
+    return New("UIStroke", {Color = color, Thickness = thick}, parent)
+end
+
+local function txt(text, size, color, parent, extraProps)
+    local p = extraProps or {}
+    local obj = New("TextLabel", {
+        Text                   = text,
+        TextSize               = size,
+        TextColor3             = color,
+        BackgroundTransparency = 1,
+        Font                   = Enum.Font.GothamMedium,
+        TextXAlignment         = p.xa or Enum.TextXAlignment.Left,
+        TextYAlignment         = Enum.TextYAlignment.Center,
+        Size                   = p.sz or UDim2.new(1, 0, 0, 20),
+        Position               = p.pos or UDim2.new(0, 0, 0, 0),
+        TextWrapped            = true,
+    }, parent)
+    return obj
+end
+
+-- ── Main window ───────────────────────────────────────────────────────────────
+
+local WIN_W  = 300
+local WIN_H  = 460
+local TITLE_H = 50
+
+local Win = New("Frame", {
+    Size             = UDim2.new(0, WIN_W, 0, WIN_H),
+    Position         = UDim2.new(0.5, -WIN_W/2, 0.5, -WIN_H/2),
+    BackgroundColor3 = BG,
+    BorderSizePixel  = 0,
+    Active           = true,
+    Draggable        = true,
+    ClipsDescendants = true,
+}, ScreenGui)
+corner(14, Win)
+stroke(BORDER, 1, Win)
+
+-- Title bar
+local TBar = New("Frame", {
+    Size             = UDim2.new(1, 0, 0, TITLE_H),
+    BackgroundColor3 = PANEL,
+    BorderSizePixel  = 0,
+}, Win)
+corner(14, TBar)
+-- fill bottom corners of title bar
+New("Frame", {
+    Size = UDim2.new(1,0,0,14), Position = UDim2.new(0,0,1,-14),
+    BackgroundColor3 = PANEL, BorderSizePixel = 0,
+}, TBar)
+
+txt("⚡ Auto Rejoin", 15, WHITE, TBar, {
+    sz  = UDim2.new(1, -54, 1, 0),
+    pos = UDim2.new(0, 14, 0, 0),
+})
+
+local MinBtn = New("TextButton", {
+    Size = UDim2.new(0, 36, 0, 36),
+    Position = UDim2.new(1, -44, 0.5, -18),
+    BackgroundColor3 = BORDER,
+    BorderSizePixel  = 0,
+    Text = "–", TextColor3 = MUTED,
+    TextSize = 18, Font = Enum.Font.GothamBold,
+    AutoButtonColor = false,
+}, TBar)
+corner(8, MinBtn)
+
+-- Scroll
+local Scroll = New("ScrollingFrame", {
+    Size                 = UDim2.new(1, 0, 1, -TITLE_H),
+    Position             = UDim2.new(0, 0, 0, TITLE_H),
+    BackgroundTransparency = 1,
+    BorderSizePixel      = 0,
+    ScrollBarThickness   = 3,
+    ScrollBarImageColor3 = BORDER,
+    CanvasSize           = UDim2.new(0, 0, 0, 0),
+    AutomaticCanvasSize  = Enum.AutomaticSize.Y,
+    ElasticBehavior      = Enum.ElasticBehavior.WhenScrollable,
+}, Win)
+
+local ListFrame = New("Frame", {
+    Size              = UDim2.new(1, 0, 0, 0),
+    BackgroundTransparency = 1,
+    AutomaticSize     = Enum.AutomaticSize.Y,
+}, Scroll)
+New("UIListLayout", {
+    Padding    = UDim.new(0, 8),
+    SortOrder  = Enum.SortOrder.LayoutOrder,
+}, ListFrame)
+New("UIPadding", {
+    PaddingLeft   = UDim.new(0, 12),
+    PaddingRight  = UDim.new(0, 12),
+    PaddingTop    = UDim.new(0, 10),
+    PaddingBottom = UDim.new(0, 14),
+}, ListFrame)
+
+-- ── Component builders ────────────────────────────────────────────────────────
+
+local layoutOrder = 0
+local function nextOrder()
+    layoutOrder = layoutOrder + 1
+    return layoutOrder
+end
+
+local function sectionHeader(title)
+    local f = New("Frame", {
+        Size = UDim2.new(1, 0, 0, 24),
+        BackgroundTransparency = 1,
+        LayoutOrder = nextOrder(),
+    }, ListFrame)
+    txt(title:upper(), 10, ACCENT, f, {
+        sz  = UDim2.new(1, 0, 1, 0),
+        xa  = Enum.TextXAlignment.Left,
+    })
+    return f
+end
+
+local function card(h)
+    local f = New("Frame", {
+        Size             = UDim2.new(1, 0, 0, h),
+        BackgroundColor3 = PANEL,
+        BorderSizePixel  = 0,
+        LayoutOrder      = nextOrder(),
+    }, ListFrame)
+    corner(10, f)
+    return f
+end
+
+-- Toggle switch
+local function makeToggle(parent, onChange)
+    local track = New("TextButton", {
+        Size             = UDim2.new(0, 50, 0, 28),
+        Position         = UDim2.new(1, -58, 0.5, -14),
+        BackgroundColor3 = BORDER,
+        BorderSizePixel  = 0,
+        Text             = "",
+        AutoButtonColor  = false,
+    }, parent)
+    corner(100, track)
+
+    local knob = New("Frame", {
+        Size             = UDim2.new(0, 22, 0, 22),
+        Position         = UDim2.new(0, 3, 0.5, -11),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel  = 0,
+    }, track)
+    corner(100, knob)
+
+    local on = false
+    track.MouseButton1Click:Connect(function()
+        on = not on
+        track.BackgroundColor3 = on and GREEN or BORDER
+        knob.Position = on
+            and UDim2.new(1, -25, 0.5, -11)
+            or  UDim2.new(0,  3,  0.5, -11)
+        onChange(on)
+    end)
+    return track
+end
+
+-- Same / New server picker
+local function makeModePicker(parent, defaultMode, onChange)
+    local row = New("Frame", {
+        Size             = UDim2.new(1, -16, 0, 34),
+        Position         = UDim2.new(0, 8, 1, -42),
+        BackgroundTransparency = 1,
+    }, parent)
+    New("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        Padding       = UDim.new(0, 6),
+    }, row)
+
+    local function makeBtn(label, mode)
+        local active = (mode == defaultMode)
+        local b = New("TextButton", {
+            Size             = UDim2.new(0.5, -3, 1, 0),
+            BackgroundColor3 = active and ACCENT or BORDER,
+            BorderSizePixel  = 0,
+            Text             = label,
+            TextColor3       = WHITE,
+            TextSize         = 13,
+            Font             = Enum.Font.GothamMedium,
+            AutoButtonColor  = false,
+        }, row)
+        corner(8, b)
+        return b
+    end
+
+    local bSame = makeBtn("Same Server", "Same")
+    local bNew  = makeBtn("New Server",  "New")
+
+    local function pick(m)
+        bSame.BackgroundColor3 = m == "Same" and ACCENT or BORDER
+        bNew.BackgroundColor3  = m == "New"  and ACCENT or BORDER
+        onChange(m)
+    end
+
+    bSame.MouseButton1Click:Connect(function() pick("Same") end)
+    bNew.MouseButton1Click:Connect(function()  pick("New")  end)
+end
+
+-- Drag slider
+local function makeSlider(parent, minV, maxV, defaultV, onChangeFn)
+    local pct = (defaultV - minV) / (maxV - minV)
+
+    local track = New("Frame", {
+        Size             = UDim2.new(1, -20, 0, 24),
+        Position         = UDim2.new(0, 10, 1, -32),
+        BackgroundColor3 = BORDER,
+        BorderSizePixel  = 0,
+    }, parent)
+    corner(100, track)
+
+    local fill = New("Frame", {
+        Size             = UDim2.new(pct, 0, 1, 0),
+        BackgroundColor3 = ACCENT,
+        BorderSizePixel  = 0,
+    }, track)
+    corner(100, fill)
+
+    local thumb = New("Frame", {
+        Size             = UDim2.new(0, 20, 0, 20),
+        Position         = UDim2.new(pct, -10, 0.5, -10),
+        BackgroundColor3 = WHITE,
+        BorderSizePixel  = 0,
+    }, track)
+    corner(100, thumb)
+
+    local function applyX(absX)
+        local rel = math.clamp((absX - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+        local val = math.floor(rel * (maxV - minV) + minV + 0.5)
+        fill.Size      = UDim2.new(rel, 0, 1, 0)
+        thumb.Position = UDim2.new(rel, -10, 0.5, -10)
+        onChangeFn(val)
+    end
+
+    local dragging = false
+
+    local clickBtn = New("TextButton", {
+        Size             = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        BorderSizePixel  = 0,
+        Text             = "",
+        ZIndex           = 2,
+    }, track)
+
+    clickBtn.MouseButton1Down:Connect(function()
+        dragging = true
+    end)
+
+    UserInputService.InputChanged:Connect(function(inp)
+        if not dragging then return end
+        if inp.UserInputType == Enum.UserInputType.MouseMovement
+        or inp.UserInputType == Enum.UserInputType.Touch then
+            applyX(inp.Position.X)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1
+        or inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+
+    -- Also handle tap on track
+    clickBtn.MouseButton1Click:Connect(function()
+        local mp = UserInputService:GetMouseLocation()
+        applyX(mp.X)
+    end)
+end
+
+-- ═══════════════════════════════════════════
+-- SECTION: AUTO REJOIN
+-- ═══════════════════════════════════════════
+
+sectionHeader("Auto Rejoin — timer based")
+
+-- Toggle card
+local rjTogCard = card(56)
+txt("Auto Rejoin", 13, WHITE, rjTogCard, {
+    sz  = UDim2.new(0.65, 0, 0, 20),
+    pos = UDim2.new(0, 12, 0, 8),
+})
+rjStatusLabel = txt("Status: Off", 11, MUTED, rjTogCard, {
+    sz  = UDim2.new(0.65, 0, 0, 18),
+    pos = UDim2.new(0, 12, 0, 28),
+})
+makeToggle(rjTogCard, function(on)
+    rejoinEnabled   = on
+    rejoinCountdown = rejoinInterval
+    if on then
+        rejoinConn = RunService.Heartbeat:Connect(function(dt)
+            if not rejoinEnabled then return end
+            rejoinCountdown = rejoinCountdown - dt
+            pcall(function()
+                local modeStr = rejoinMode == "Same" and "Same" or "New"
+                rjStatusLabel.Text       = modeStr .. " | " .. math.max(0, math.floor(rejoinCountdown)) .. "s"
+                rjStatusLabel.TextColor3 = GREEN
+            end)
+            if rejoinCountdown <= 0 then
+                rejoinCountdown = rejoinInterval
+                doTeleport(rejoinMode)
+            end
+        end)
+    else
+        if rejoinConn then rejoinConn:Disconnect(); rejoinConn = nil end
+        pcall(function()
+            rjStatusLabel.Text       = "Status: Off"
+            rjStatusLabel.TextColor3 = MUTED
+        end)
+    end
+end)
+
+-- Mode picker card
+local rjModeCard = card(84)
+txt("Target Server", 13, WHITE, rjModeCard, {
+    sz  = UDim2.new(1, -16, 0, 20),
+    pos = UDim2.new(0, 12, 0, 6),
+})
+makeModePicker(rjModeCard, "Same", function(m)
+    rejoinMode = m
+end)
+
+-- Interval slider card
+local rjSliderCard = card(70)
+local rjIntLbl = txt("Interval: 30s", 13, WHITE, rjSliderCard, {
+    sz  = UDim2.new(1, -16, 0, 20),
+    pos = UDim2.new(0, 12, 0, 6),
+})
+makeSlider(rjSliderCard, 5, 120, 30, function(v)
+    rejoinInterval  = v
+    rejoinCountdown = v
+    rjIntLbl.Text   = "Interval: " .. v .. "s"
+end)
+
+-- Rejoin Now button card
+local rjNowCard = card(56)
+local rjNowBtn = New("TextButton", {
+    Size             = UDim2.new(1, -24, 0, 40),
+    Position         = UDim2.new(0, 12, 0, 8),
+    BackgroundColor3 = ACCENT,
+    BorderSizePixel  = 0,
+    Text             = "Rejoin Now",
+    TextColor3       = WHITE,
+    TextSize         = 14,
+    Font             = Enum.Font.GothamBold,
+    AutoButtonColor  = false,
+}, rjNowCard)
+corner(9, rjNowBtn)
+rjNowBtn.MouseButton1Click:Connect(function()
+    rjNowBtn.BackgroundColor3 = ACCENT2
+    task.delay(0.15, function() rjNowBtn.BackgroundColor3 = ACCENT end)
+    task.delay(0.8, function() doTeleport(rejoinMode) end)
+end)
+
+-- ═══════════════════════════════════════════
+-- SECTION: AUTO RECONNECT
+-- ═══════════════════════════════════════════
+
+sectionHeader("Auto Reconnect — on kick / disconnect")
+
+-- Toggle card
+local rcTogCard = card(56)
+txt("Auto Reconnect", 13, WHITE, rcTogCard, {
+    sz  = UDim2.new(0.65, 0, 0, 20),
+    pos = UDim2.new(0, 12, 0, 8),
+})
+rcStatusLabel = txt("Status: Off", 11, MUTED, rcTogCard, {
+    sz  = UDim2.new(0.65, 0, 0, 18),
+    pos = UDim2.new(0, 12, 0, 28),
+})
+makeToggle(rcTogCard, function(on)
+    reconnectEnabled = on
+    if on then
+        startReconnectListeners()
+        pcall(function()
+            rcStatusLabel.Text       = (reconnectMode == "Same" and "Same" or "New") .. " | Watching"
+            rcStatusLabel.TextColor3 = GREEN
+        end)
+    else
+        stopReconnectListeners()
+        pcall(function()
+            rcStatusLabel.Text       = "Status: Off"
+            rcStatusLabel.TextColor3 = MUTED
+        end)
+    end
+end)
+
+-- Mode picker card
+local rcModeCard = card(84)
+txt("Target Server", 13, WHITE, rcModeCard, {
+    sz  = UDim2.new(1, -16, 0, 20),
+    pos = UDim2.new(0, 12, 0, 6),
+})
+makeModePicker(rcModeCard, "Same", function(m)
+    reconnectMode = m
+    pcall(function()
+        if reconnectEnabled then
+            rcStatusLabel.Text = (m == "Same" and "Same" or "New") .. " | Watching"
+        end
+    end)
+end)
+
+-- Delay slider card
+local rcSliderCard = card(70)
+local rcDelayLbl = txt("Reconnect Delay: 5s", 13, WHITE, rcSliderCard, {
+    sz  = UDim2.new(1, -16, 0, 20),
+    pos = UDim2.new(0, 12, 0, 6),
+})
+makeSlider(rcSliderCard, 1, 30, 5, function(v)
+    reconnectDelay  = v
+    rcDelayLbl.Text = "Reconnect Delay: " .. v .. "s"
+end)
+
+-- ═══════════════════════════════════════════
+-- MINIMIZE
+-- ═══════════════════════════════════════════
+
+local minimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized            = not minimized
+    Scroll.Visible       = not minimized
+    Win.Size             = minimized
+        and UDim2.new(0, WIN_W, 0, TITLE_H)
+        or  UDim2.new(0, WIN_W, 0, WIN_H)
+    MinBtn.Text          = minimized and "+" or "–"
+end)
+
+-- Done
+print("[AutoRejoin] Loaded successfully on PlaceId " .. placeId)
